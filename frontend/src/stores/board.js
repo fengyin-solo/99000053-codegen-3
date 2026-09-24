@@ -8,6 +8,10 @@ export const useBoardStore = defineStore('board', () => {
   const columns = ref([])
   const cards = ref({}) // keyed by columnId -> [cards]
   const loading = ref(false)
+  // Monotonic token bumped whenever the displayed board changes. Async loads
+  // capture it and discard results from a board that is no longer current, so
+  // switching boards can never mix in the previous board's late responses.
+  let boardLoadSeq = 0
 
   // Board actions
   async function fetchBoards() {
@@ -33,17 +37,30 @@ export const useBoardStore = defineStore('board', () => {
 
   // Column actions
   async function fetchColumns(boardId) {
+    // A different board means the old board's in-flight responses must be
+    // discarded; a refresh of the same board keeps the token (and cards).
+    const previousSeq = boardLoadSeq
+    if (!currentBoard.value || currentBoard.value.id !== boardId) {
+      boardLoadSeq++
+      columns.value = []
+      cards.value = {}
+    }
+    const seq = boardLoadSeq
     loading.value = true
     try {
       const res = await columnApi.list(boardId)
+      if (seq !== boardLoadSeq) return // user switched away while loading
       columns.value = res.data
-      // Initialize cards map
-      cards.value = {}
+      // Rebuild the cards map. A new board always starts with empty buckets;
+      // a same-board refresh keeps cards already loaded for surviving ids.
+      const switchedBoard = seq !== previousSeq
+      const nextCards = {}
       for (const col of res.data) {
-        cards.value[col.id] = []
+        nextCards[col.id] = switchedBoard ? [] : (cards.value[col.id] || [])
       }
+      cards.value = nextCards
     } finally {
-      loading.value = false
+      if (seq === boardLoadSeq) loading.value = false
     }
   }
 
@@ -84,10 +101,14 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   async function fetchAllCards(boardId) {
+    const seq = boardLoadSeq
     // Fetch cards for all columns in parallel
     const cols = columns.value
     const promises = cols.map(col => cardApi.list(col.id))
     const results = await Promise.all(promises)
+    if (seq !== boardLoadSeq || !currentBoard.value || currentBoard.value.id !== boardId) {
+      return // switched boards while cards were in flight; don't mix boards
+    }
     cols.forEach((col, i) => {
       cards.value[col.id] = results[i].data
     })
@@ -142,6 +163,7 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   function clearBoard() {
+    boardLoadSeq++
     currentBoard.value = null
     columns.value = []
     cards.value = {}
