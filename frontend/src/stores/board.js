@@ -9,6 +9,10 @@ export const useBoardStore = defineStore('board', () => {
   const cards = ref({}) // keyed by columnId -> [cards]
   const loading = ref(false)
 
+  // Token identifying the latest board load; stale responses are discarded so
+  // switching boards can never let a previous board's columns/cards leak back.
+  let loadToken = 0
+
   // Board actions
   async function fetchBoards() {
     loading.value = true
@@ -33,17 +37,21 @@ export const useBoardStore = defineStore('board', () => {
 
   // Column actions
   async function fetchColumns(boardId) {
+    const token = ++loadToken
     loading.value = true
     try {
       const res = await columnApi.list(boardId)
+      if (token !== loadToken) return res // superseded by another board load
       columns.value = res.data
-      // Initialize cards map
+      // Reset the cards map entirely so removed columns / other boards can
+      // never leave stale cards behind.
       cards.value = {}
       for (const col of res.data) {
         cards.value[col.id] = []
       }
+      return res
     } finally {
-      loading.value = false
+      if (token === loadToken) loading.value = false
     }
   }
 
@@ -84,13 +92,19 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   async function fetchAllCards(boardId) {
+    const token = loadToken
     // Fetch cards for all columns in parallel
     const cols = columns.value
     const promises = cols.map(col => cardApi.list(col.id))
     const results = await Promise.all(promises)
+    // A different board may have been opened while requests were in flight;
+    // do not write its cards into the current board.
+    if (token !== loadToken) return
+    const next = {}
     cols.forEach((col, i) => {
-      cards.value[col.id] = results[i].data
+      next[col.id] = results[i].data
     })
+    cards.value = next
   }
 
   async function addCard(columnId, data) {
@@ -142,6 +156,8 @@ export const useBoardStore = defineStore('board', () => {
   }
 
   function clearBoard() {
+    // Invalidate any in-flight load so it cannot repopulate state after unmount
+    loadToken++
     currentBoard.value = null
     columns.value = []
     cards.value = {}
